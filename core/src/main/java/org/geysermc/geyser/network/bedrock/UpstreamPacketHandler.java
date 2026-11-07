@@ -29,6 +29,7 @@ import io.netty.buffer.Unpooled;
 import org.cloudburstmc.math.vector.Vector2f;
 import org.cloudburstmc.protocol.bedrock.data.ResourcePackType;
 import org.cloudburstmc.protocol.bedrock.packet.BedrockPacket;
+import org.cloudburstmc.protocol.bedrock.packet.DisconnectPacket;
 import org.cloudburstmc.protocol.bedrock.packet.ModalFormResponsePacket;
 import org.cloudburstmc.protocol.bedrock.packet.PlayerAuthInputPacket;
 import org.cloudburstmc.protocol.bedrock.packet.ResourcePackChunkDataPacket;
@@ -118,6 +119,41 @@ public class UpstreamPacketHandler extends LoggingPacketHandler {
         GeyserLocale.loadGeyserLocale(session.locale());
     }
 
+    /**
+     * Takes over a split-screen guest once {@link LoginPacketHandler} has finished its sub-client login.
+     *
+     * <p>Resource packs are negotiated once for the console, by the primary session, so a guest skips
+     * that phase entirely. Marking it done keeps a stray {@link ResourcePackClientResponsePacket} for
+     * this slot from restarting it.
+     */
+    void startSubClient() {
+        finishedResourcePackSending = true;
+        GeyserLocale.loadGeyserLocale(session.locale());
+        connectToJavaServer();
+        geyser.getLogger().info(GeyserLocale.getLocaleStringLog("geyser.network.connect", session.getAuthData().name() +
+            " (" + session.protocolVersion() + ") [split-screen sub-client]"));
+    }
+
+    private void connectToJavaServer() {
+        if (geyser.config().java().authType() != AuthType.ONLINE) {
+            session.authenticate(session.getAuthData().name());
+        } else if (!couldLoginUserByName(session.getAuthData().name())) {
+            // We must spawn the white world
+            session.connect();
+        }
+    }
+
+    /**
+     * A client-sent disconnect. For the primary session this merely front-runs the transport
+     * disconnect that follows, but for a split-screen guest it is the only notice there is: the
+     * console's connection stays up, so nothing else would tell us that slot is now empty.
+     */
+    @Override
+    public PacketSignal handle(DisconnectPacket packet) {
+        session.disconnect(packet.getKickMessage() != null ? packet.getKickMessage() : "Client disconnected");
+        return PacketSignal.HANDLED;
+    }
+
     @Override
     public PacketSignal handle(ResourcePackClientResponsePacket packet) {
         if (session.getUpstream().isClosed() || session.isClosed()) {
@@ -132,12 +168,7 @@ public class UpstreamPacketHandler extends LoggingPacketHandler {
         switch (packet.getStatus()) {
             case COMPLETED -> {
                 finishedResourcePackSending = true;
-                if (geyser.config().java().authType() != AuthType.ONLINE) {
-                    session.authenticate(session.getAuthData().name());
-                } else if (!couldLoginUserByName(session.getAuthData().name())) {
-                    // We must spawn the white world
-                    session.connect();
-                }
+                connectToJavaServer();
                 geyser.getLogger().info(GeyserLocale.getLocaleStringLog("geyser.network.connect", session.getAuthData().name() +
                     " (" + session.protocolVersion() + ")"));
             }

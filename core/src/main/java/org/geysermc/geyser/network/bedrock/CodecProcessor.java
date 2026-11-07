@@ -85,7 +85,6 @@ import org.cloudburstmc.protocol.bedrock.packet.SetEntityMotionPacket;
 import org.cloudburstmc.protocol.bedrock.packet.SettingsCommandPacket;
 import org.cloudburstmc.protocol.bedrock.packet.SimpleEventPacket;
 import org.cloudburstmc.protocol.bedrock.packet.SubChunkRequestPacket;
-import org.cloudburstmc.protocol.bedrock.packet.SubClientLoginPacket;
 import org.cloudburstmc.protocol.common.util.VarInts;
 import org.geysermc.geyser.GeyserImpl;
 import org.geysermc.geyser.session.UpstreamSession;
@@ -95,7 +94,7 @@ import org.geysermc.geyser.session.UpstreamSession;
  */
 @SuppressWarnings("deprecation")
 public class CodecProcessor {
-    
+
     /**
      * Generic serializer that throws an exception when trying to serialize or deserialize a packet, leading to client disconnection.
      */
@@ -270,7 +269,10 @@ public class CodecProcessor {
             .updateSerializer(CraftingEventPacket.class, ILLEGAL_SERIALIZER)
             // Illegal unusued serverbound packets that relate to unused features
             .updateSerializer(ClientCacheBlobStatusPacket.class, ILLEGAL_SERIALIZER)
-            .updateSerializer(SubClientLoginPacket.class, ILLEGAL_SERIALIZER)
+            // SubClientLoginPacket is deliberately absent from this list: it is how a console
+            // announces a split-screen guest, and rejecting it here tore down the whole
+            // connection - ejecting the player who was already in the world. See
+            // LoginPacketHandler#handle(SubClientLoginPacket).
             .updateSerializer(SubChunkRequestPacket.class, ILLEGAL_SERIALIZER)
             .updateSerializer(GameTestRequestPacket.class, ILLEGAL_SERIALIZER)
             // Illegal bidirectional packets
