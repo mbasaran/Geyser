@@ -128,12 +128,11 @@ public interface GeyserConfig {
     @ConfigSerializable
     interface SignalingConfig {
         @Comment("""
-            How Bedrock players find this server over NetherNet.
-            "builtin": Geyser runs a local signaling server on the Bedrock port over TCP. This option is not compatible
-            with running the Java server on the Bedrock port.
-            "nxs": Geyser registers with the external signaling service configured below.
-            "hybrid": uses both "builtin" and "nxs".
-            "none" turns signaling off.""")
+            How Bedrock players find this server when using NetherNet.
+            "builtin": Geyser runs its own signaling server on the Bedrock port, over TCP. This does not work if the Java server
+            uses the same port (for example with "clone-remote-port"). In that case, Geyser automatically falls back to "nxs".
+            "nxs": Geyser registers this server with the external signaling service configured in "nxs.endpoint" below.
+            "hybrid": uses "builtin" and "nxs" at the same time.""")
         default Mode mode() {
             return Mode.BUILTIN;
         }
@@ -141,13 +140,34 @@ public interface GeyserConfig {
         void mode(Mode mode);
 
         /**
-         * The TCP port built-in signaling binds, set by {@code -DgeyserSignalingPort} when a host routes it separately.
-         * Resolved to the Bedrock port on startup when the property is unset.
+         * The TCP port built-in signaling binds on, set by {@code -DgeyserSignalingPort} when a host routes it separately.
+         * Falls back to the Bedrock port on startup when the property is not set
          */
         @Field
         int port();
 
         void port(int port);
+
+        @Comment("""
+            The addresses sent to connecting players for the NetherNet WebRTC connection, by both built-in and external signaling,
+            e.g. play.example.com, 198.51.100.1 or [2001:db8::1]:19133. If no port is given, the NetherNet UDP port is used.
+            A host name is looked up when signaling starts, and signaling does not start if it does not resolve.
+            You can list an address this machine does not have, such as your public IP, if your router forwards that port
+            to this machine. You need to set up the port forwarding yourself.
+            With "webrtc-proxy-protocol-relays" set under "advanced.bedrock", list the relays here instead.
+            Leave empty to use this machine's own addresses, plus the public address found with "stun-discovery".""")
+        @AsteriskSerializer.Asterisk
+        default List<String> advertiseAddresses() {
+            return List.of();
+        }
+
+        @Comment("""
+            Finds this server's public address through STUN when "advertise-addresses" is empty.
+            Built-in signaling asks public STUN servers, and the external signaling service asks its own.""")
+        @DefaultBoolean(true)
+        boolean stunDiscovery();
+
+        void stunDiscovery(boolean stunDiscovery);
 
         @Comment("Settings for built-in signaling. Only used in the \"builtin\" and \"hybrid\" modes.")
         BuiltinConfig builtin();
@@ -158,8 +178,7 @@ public interface GeyserConfig {
         enum Mode {
             BUILTIN,
             NXS,
-            HYBRID,
-            NONE;
+            HYBRID;
 
             public boolean builtin() {
                 return this == BUILTIN || this == HYBRID;
@@ -172,25 +191,26 @@ public interface GeyserConfig {
 
         @ConfigSerializable
         interface BuiltinConfig {
-            @Comment("Serves signaling over HTTPS as well as HTTP, on the same port.")
+            @Comment("Settings for serving built-in signaling over HTTPS. When configured, HTTP will be rejected.")
             HttpsConfig https();
 
             @ConfigSerializable
             interface HttpsConfig {
                 @Comment("""
-                    Path to a TLS certificate: either a PEM chain (with its key in "private-key"), or a PKCS12 file
-                    (leave "private-key" empty). Players reaching signaling over TLS are not shown the "trust on first use" prompt. 
-                    Leave this empty to only serve plain HTTP.""")
+                    Path to a TLS certificate. This can be a PEM chain (put its key in "private-key"),
+                    or a PKCS12 file (leave "private-key" empty).
+                    Players connecting over HTTPS do not see the "trust on first use" prompt.
+                    Leave empty to only use HTTP.""")
                 @DefaultString()
                 String certificate();
 
-                @Comment("PEM private key for \"certificate\". Leave empty when that is a PKCS12 file.")
+                @Comment("Path to the PEM private key for \"certificate\". Leave empty if \"certificate\" is a PKCS12 file.")
                 @DefaultString()
                 String privateKey();
 
                 @Comment("""
-                    Password for the PKCS12 file, or for the PEM key if it is encrypted.
-                    Use "file:/path/to/password" to read it from a file instead, which is safer than writing it here.""")
+                    Password for the PKCS12 file, or for the PEM private key if it is encrypted. Leave empty if there is none.
+                    You can also use "file:/path/to/password" to read it from a file, which is safer than writing it here.""")
                 @DefaultString()
                 @AsteriskSerializer.Secret
                 String password();
@@ -199,26 +219,14 @@ public interface GeyserConfig {
 
         @ConfigSerializable
         interface NxsConfig {
-            @Comment("Additional public UDP endpoints players can reach this server on, e.g. 198.51.100.1:19133 or [2001:db8::1]:19133. Port forwarding is not set up for you.")
-            default List<String> advertiseAddresses() {
-                return List.of();
-            }
-
             @Comment("Access token for the signaling service, or file:/path/to/token to read it from a file. Leave empty to register without an account.")
             @DefaultString()
             @AsteriskSerializer.Secret
             String token();
 
-            @Comment("Address of the external signaling service (NXS). Defaults to warden.")
+            @Comment("Address of the external signaling service (NXS).")
             @DefaultString("https://agent.warden.cloud")
             String endpoint();
-
-            @Comment("""
-                Additional details sent to the signaling service, such as "region" or "pool" to choose where this server is listed. 
-                Other keys are sent as registration tags.""")
-            default Map<String, String> data() {
-                return Map.of();
-            }
         }
     }
 
@@ -237,7 +245,7 @@ public interface GeyserConfig {
 
         @Comment("""
             The port that Geyser will listen on for incoming Bedrock connections.
-            Built-in signaling uses this port over TCP, and RakNet uses it over UDP.""")
+            Built-in signaling uses this port over TCP (and UDP if "webrtc-port" is not set), and RakNet uses it over UDP.""")
         @Override
         @DefaultNumeric(19132)
         @NumericRange(from = 0, to = 65535)
@@ -246,8 +254,9 @@ public interface GeyserConfig {
         void port(int port);
 
         @Comment("""
-            The UDP port that NetherNet connections use. 0 means the same port as above.
-            If raknet and nethernet transport mode are used in parallel, then this port has to be different to the port above.""")
+            The UDP port used for NetherNet connections. When set to 0, Geyser uses the "port" value set above.
+            Players connect to it directly, so forward it when behind a router. With "nxs" signaling and
+            assisted-joins off, they cannot connect otherwise.""")
         @DefaultNumeric(0)
         @NumericRange(from = 0, to = 65535)
         int webrtcPort();
@@ -265,25 +274,26 @@ public interface GeyserConfig {
         void raknetPort(int port);
 
         @Comment("""
-            How Bedrock players connect. Changes require a restart.
-            "nethernet" uses NetherNet (with signaling), which is the new connection method for Bedrock Edition.
-            "both" accepts both NetherNet and RakNet. They each need their own UDP port: see "webrtc-port".
-            "raknet" only accepts RakNet, the now deprecated connection method which will be removed in the future.""")
+            How Bedrock players can connect. Changes require a restart.
+            "nethernet": the new connection method for Bedrock Edition. It needs signaling, see "signaling" below.
+            "both": accepts NetherNet and RakNet. Each needs its own UDP port, see "port" and "webrtc-port".""")
         default Transport transport() {
-            return Transport.RAKNET;
+            return Transport.NETHERNET;
         }
 
         void transport(Transport transport);
 
         @Comment("""
-                Some hosting services change your Java port everytime you start the server and require the same port to be used for Bedrock.
-                This option makes the Bedrock port the same as the Java port every time you start the server.""")
+            Some hosting services change your Java port everytime you start the server and require the same port to be used for Bedrock.
+            This option makes the Bedrock port the same as the Java port every time you start the server.
+            If you use this option, you will need to either have an additional signaling port, or use NXS as signaling cannot share a port with the Java server.
+            """)
         @DefaultBoolean
         @PluginSpecific
         boolean cloneRemotePort();
 
         @Comment("""
-            Signaling is how Bedrock players find this server and start a NetherNet connection to it.
+            Signaling is how Bedrock players find this server to set up a NetherNet WebRTC connection to it.
             Only used with the "nethernet" and "both" transports. Changes require a restart.""")
         SignalingConfig signaling();
 
@@ -313,16 +323,10 @@ public interface GeyserConfig {
 
         enum Transport {
             NETHERNET,
-            BOTH,
-            // Deprecated, removed in Minecraft: Bedrock Edition 26.60
-            RAKNET;
+            BOTH;
 
             public boolean raknet() {
-                return this == BOTH || this == RAKNET;
-            }
-
-            public boolean nethernet() {
-                return this == BOTH || this == NETHERNET;
+                return this == BOTH;
             }
         }
     }
@@ -333,8 +337,8 @@ public interface GeyserConfig {
         void port(int port);
 
         @Comment("""
-                What type of authentication Bedrock players will be checked against when logging into the Java server.
-                Can be "floodgate" (see https://wiki.geysermc.org/floodgate/), "online", or "offline".""")
+            What type of authentication Bedrock players will be checked against when logging into the Java server.
+            Can be "floodgate" (see https://wiki.geysermc.org/floodgate/), "online", or "offline".""")
         @NonNull
         @Override
         default AuthType authType() {
@@ -509,7 +513,8 @@ public interface GeyserConfig {
         @Comment("""
                 The port to broadcast to Bedrock clients with the MOTD that they should use to connect to the server.
                 A value of 0 will broadcast the port specified above.
-                DO NOT change this unless Geyser runs on a different port than the one that is used to connect.""")
+                DO NOT change this unless Geyser runs on a different port than the one that is used to connect.
+                This option is no longer relevant with NetherNet, and will be removed once RakNet is no longer supported.""")
         @DefaultNumeric(0)
         @NumericRange(from = 0, to = 65535)
         int broadcastPort();
@@ -524,22 +529,52 @@ public interface GeyserConfig {
         int compressionLevel();
 
         @Comment("""
-                Whether to expect HAPROXY protocol for connecting Bedrock clients.
-                This is useful only when you are running a reverse proxy in front of your Geyser instance.
-                This applies to RakNet and to built-in signaling. Signaling connections without a PROXY header are still accepted.
+                A list of HAPROXY protocol speaking proxies in front of your Geyser instance.
+                Listing one turns HAPROXY protocol on, so leave this empty unless you run such a proxy.
+                Built-in signaling reads HAPROXY headers from these proxies, and still accepts their connections without one.
+                With the "both" transport, RakNet only accepts these proxies, and each connection has to start with a HAPROXY header.
+                Proxies in this list are also not affected by built-in signaling's per-address connection limit.
+                IP addresses, subnets, and links to plain text files are supported.
                 IF YOU DON'T KNOW WHAT THIS IS, DON'T TOUCH IT!""")
-        @DefaultBoolean
-        boolean useHaproxyProtocol();
-
-        @Comment("""
-                A list of allowed HAPROXY protocol speaking proxy IP addresses/subnets. Only effective when "use-haproxy-protocol" is enabled, and
-                should really only be used when you are not able to use a proper firewall (usually true with shared hosting providers etc.).
-                Built-in signaling also only trusts forwarded player addresses from these proxies.
-                Keeping this list empty means there is no IP address whitelist.
-                IP addresses, subnets, and links to plain text files are supported.""")
+        @AsteriskSerializer.Asterisk
         default List<String> haproxyProtocolWhitelistedIps() {
             return Collections.emptyList();
         }
+
+        @Comment("""
+                A list of reverse proxy addresses (for example, an HTTP load balancer) in front of built-in signaling.
+                Built-in signaling reads the player's real address from the "X-Forwarded-For" header, and does not apply
+                its per-address connection limit to them for all listed proxies. This is separate from HAPROXY protocol.
+                With more than one proxy in front of signaling, such as a CDN in front of nginx, list every one of them,
+                or have the last one send only the player's address in "X-Forwarded-For".
+                IP addresses, subnets, and links to plain text files are supported.
+                IF YOU DON'T KNOW WHAT THIS IS, DON'T TOUCH IT!""")
+        @AsteriskSerializer.Asterisk
+        default List<String> signalingTrustedProxies() {
+            return Collections.emptyList();
+        }
+
+        @Comment("""
+                UDP relays in front of the NetherNet media (WebRTC) port that send a PROXY protocol v2 header with each
+                player's address, as IP addresses or subnets. Leave this empty unless you run such a relay.
+                While set, players can only reach the media port through these relays, so "advertise-addresses" under
+                "bedrock.signaling" should name the relays. Without any, the external signaling service does not start, and
+                built-in signaling only works if something in front of it rewrites its answers to name the relays.
+                This is separate from the two lists above, which only cover signaling, and RakNet with the "both" transport.
+                IP addresses, subnets, and links to plain text files are supported.
+                IF YOU DON'T KNOW WHAT THIS IS, DON'T TOUCH IT!""")
+        @AsteriskSerializer.Asterisk
+        default List<String> webrtcProxyProtocolRelays() {
+            return Collections.emptyList();
+        }
+
+        @Comment("""
+                Use the player address that built-in signaling's proxies send ("haproxy-protocol-whitelisted-ips" or
+                "signaling-trusted-proxies") instead of the one the WebRTC connection comes from. Enable this when the WebRTC
+                port is forwarded without PROXY protocol, so every player would otherwise show the forwarder's address.
+                IF YOU DON'T KNOW WHAT THIS IS, DON'T TOUCH IT!""")
+        @DefaultBoolean
+        boolean preferSignalingProxyAddress();
 
         @Comment("""
                Should be enabled if this Geyser instance is behind a WaterdogPE proxy. If enabled, Geyser will
@@ -563,6 +598,12 @@ public interface GeyserConfig {
             All Floodgate functionality (including skin uploading and account linking) will also not work when this option is disabled.""")
         @DefaultBoolean(true)
         boolean validateBedrockLogin();
+
+        @Comment("""
+            Whether to log NetherNet's debug messages, from libdatachannel and NetherNet itself, such as what signaling
+            and STUN discovery do. Useful when players cannot connect over NetherNet.""")
+        @DefaultBoolean
+        boolean nethernetDebug();
     }
 
     @ConfigSerializable
@@ -602,6 +643,35 @@ public interface GeyserConfig {
         @DefaultBoolean(true)
         @PluginSpecific
         boolean disableCompression();
+    }
+
+    @ConfigSerializable
+    interface AdvancedNxsConfig {
+        @Comment("""
+            Lets the signaling service help players connect when they cannot reach this server directly,
+            for example when the server is behind a NAT without port forwarding.""")
+        @DefaultBoolean()
+        boolean assistedJoins();
+
+        @Comment("""
+            Lets the signaling service check from several regions that players can reach this server,
+            and stop offering addresses that fail.""")
+        @DefaultBoolean(true)
+        boolean connectionChecks();
+
+        @Comment("""
+            Where this server is: "country" (a two-letter code), "city", "latitude" and "longitude".
+            Leave empty to let the signaling service estimate or configure it.""")
+        default Map<String, String> location() {
+            return Map.of();
+        }
+
+        @Comment("""
+            Removes this server from the signaling service when Geyser shuts down.
+            Enable this if the "nethernet" folder is lost on every restart (for example, in a container without a volume).
+            Otherwise, every restart registers this server again as a new one.""")
+        @DefaultBoolean()
+        boolean deregisterOnShutdown();
     }
 
     @ConfigSerializable
@@ -647,5 +717,8 @@ public interface GeyserConfig {
 
         @Comment("Advanced networking options for Geyser's Bedrock listener")
         AdvancedBedrockConfig bedrock();
+
+        @Comment("Advanced options for the external signaling service. Only used in the \"nxs\" and \"hybrid\" signaling modes.")
+        AdvancedNxsConfig nxs();
     }
 }

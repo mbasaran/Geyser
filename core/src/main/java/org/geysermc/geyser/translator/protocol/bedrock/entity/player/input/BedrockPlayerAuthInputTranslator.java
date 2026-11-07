@@ -53,14 +53,13 @@ import org.geysermc.geyser.translator.protocol.Translator;
 import org.geysermc.geyser.util.CooldownUtils;
 import org.geysermc.mcprotocollib.protocol.data.game.entity.metadata.Pose;
 import org.geysermc.mcprotocollib.protocol.data.game.entity.player.GameMode;
-import org.geysermc.mcprotocollib.protocol.data.game.entity.player.Hand;
 import org.geysermc.mcprotocollib.protocol.data.game.entity.player.PlayerState;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.ServerboundClientTickEndPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.level.ServerboundMoveVehiclePacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundPlayerAbilitiesPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundPlayerCommandPacket;
+import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundPunchPacket;
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundSpectatorActionPacket;
-import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundSwingPacket;
 
 import java.util.HashSet;
 import java.util.List;
@@ -186,7 +185,7 @@ public final class BedrockPlayerAuthInputTranslator extends PacketTranslator<Pla
                     if (session.getGameMode() == GameMode.SPECTATOR) {
                         session.sendDownstreamGamePacket(new ServerboundSpectatorActionPacket(OptionalInt.empty()));
                     } else if (session.getArmAnimationTicks() != 0 && session.getArmAnimationTicks() != 1) {
-                        session.sendDownstreamGamePacket(new ServerboundSwingPacket(Hand.MAIN_HAND));
+                        session.sendDownstreamGamePacket(ServerboundPunchPacket.INSTANCE);
                         session.activateArmAnimationTicking();
                     }
 
@@ -258,7 +257,9 @@ public final class BedrockPlayerAuthInputTranslator extends PacketTranslator<Pla
             return;
         }
 
-        boolean inClientPredictedVehicle = session.isInClientPredictedVehicle();
+        // java backend doesn't allow pos updates unless it's the root vehicle (don't emit other vehicle pos updates),
+        // just see ClientVehicle#shouldSimulateMovement for a better idea on why this logic is here
+        boolean inClientPredictedVehicle = session.isInClientPredictedVehicle() && vehicle.getVehicle() == null;
         if (vehicle instanceof ClientVehicle) {
             // Classic input mode for boat vehicle send PADDLE_LEFT/RIGHT instead of motion values.
             boolean isMobileAndClassicMovement = packet.getInputMode() == InputMode.TOUCH && packet.getInputInteractionModel() == InputInteractionModel.CLASSIC;
@@ -353,7 +354,7 @@ public final class BedrockPlayerAuthInputTranslator extends PacketTranslator<Pla
             vehicle.setPosition(vehiclePosition);
             ServerboundMoveVehiclePacket moveVehiclePacket = new ServerboundMoveVehiclePacket(
                 vehiclePosition.toDouble(),
-                vehicle instanceof BoatEntity ? vehicleRotation.getY() - 90 : vehicleRotation.getY(), vehiclePosition.getX(),
+                vehicle instanceof BoatEntity ? vehicleRotation.getY() - 90 : vehicleRotation.getY(), vehicleRotation.getX(),
                 vehicle.isOnGround()
             );
             session.sendDownstreamGamePacket(moveVehiclePacket);

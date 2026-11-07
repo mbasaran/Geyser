@@ -109,6 +109,7 @@ import org.cloudburstmc.protocol.bedrock.packet.UpdateAttributesPacket;
 import org.cloudburstmc.protocol.bedrock.packet.UpdateClientInputLocksPacket;
 import org.cloudburstmc.protocol.bedrock.packet.UpdateSoftEnumPacket;
 import org.cloudburstmc.protocol.bedrock.packet.VoxelShapesPacket;
+import org.cloudburstmc.protocol.bedrock.util.JoinAddress;
 import org.cloudburstmc.protocol.common.util.OptionalBoolean;
 import org.geysermc.api.util.BedrockPlatform;
 import org.geysermc.api.util.InputMode;
@@ -154,8 +155,8 @@ import org.geysermc.geyser.inventory.Inventory;
 import org.geysermc.geyser.inventory.InventoryHolder;
 import org.geysermc.geyser.inventory.LecternContainer;
 import org.geysermc.geyser.inventory.PlayerInventory;
+import org.geysermc.geyser.inventory.click.ClickPlan;
 import org.geysermc.geyser.inventory.recipe.GeyserRecipe;
-import org.geysermc.geyser.inventory.recipe.GeyserSmithingRecipe;
 import org.geysermc.geyser.inventory.recipe.GeyserStonecutterData;
 import org.geysermc.geyser.inventory.recipe.TrimRecipes;
 import org.geysermc.geyser.item.Items;
@@ -164,9 +165,10 @@ import org.geysermc.geyser.level.BedrockDimension;
 import org.geysermc.geyser.level.JavaDimension;
 import org.geysermc.geyser.level.gamerule.GameRuleHandler;
 import org.geysermc.geyser.level.physics.CollisionManager;
-import org.geysermc.geyser.network.bedrock.GameProtocol;
 import org.geysermc.geyser.network.java.LocalSession;
 import org.geysermc.geyser.registry.Registries;
+import org.geysermc.geyser.registry.java.JavaRegistries;
+import org.geysermc.geyser.registry.java.JavaRegistryProvider;
 import org.geysermc.geyser.registry.type.BlockMappings;
 import org.geysermc.geyser.registry.type.ItemMappings;
 import org.geysermc.geyser.session.auth.AuthData;
@@ -184,20 +186,19 @@ import org.geysermc.geyser.session.cache.InputCache;
 import org.geysermc.geyser.session.cache.LodestoneCache;
 import org.geysermc.geyser.session.cache.PistonCache;
 import org.geysermc.geyser.session.cache.PreferencesCache;
-import org.geysermc.geyser.session.cache.RegistryCache;
 import org.geysermc.geyser.session.cache.SkullCache;
 import org.geysermc.geyser.session.cache.StructureBlockCache;
-import org.geysermc.geyser.session.cache.TagCache;
 import org.geysermc.geyser.session.cache.TeleportCache;
 import org.geysermc.geyser.session.cache.WorldBorder;
 import org.geysermc.geyser.session.cache.WorldCache;
-import org.geysermc.geyser.session.cache.registry.JavaRegistries;
+import org.geysermc.geyser.session.cache.registry.JavaRegistryTagCache;
 import org.geysermc.geyser.session.cache.tags.DialogTag;
 import org.geysermc.geyser.session.cache.waypoint.WaypointCache;
 import org.geysermc.geyser.session.dialog.BuiltInDialog;
 import org.geysermc.geyser.session.dialog.Dialog;
 import org.geysermc.geyser.session.dialog.DialogManager;
 import org.geysermc.geyser.skin.SkinManager;
+import org.geysermc.geyser.skin.SkinProvider;
 import org.geysermc.geyser.text.GeyserLocale;
 import org.geysermc.geyser.translator.inventory.InventoryTranslator;
 import org.geysermc.geyser.translator.text.MessageTranslator;
@@ -268,7 +269,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Getter
-public class GeyserSession implements GeyserConnection, GeyserCommandSource {
+public class GeyserSession implements GeyserConnection, GeyserCommandSource, JavaRegistryProvider.Provider {
     private static final String UNKNOWN_LOG_NAME = "This account";
 
     private final GeyserImpl geyser;
@@ -306,7 +307,6 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
     private final BookEditCache bookEditCache;
     private final BundleCache bundleCache;
     private final ChunkCache chunkCache;
-    private final ComponentCache componentCache;
     private final EntityCache entityCache;
     private final EntityEffectCache effectCache;
     private final FormCache formCache;
@@ -315,10 +315,11 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
     private final LodestoneCache lodestoneCache;
     private final PistonCache pistonCache;
     private final PreferencesCache preferencesCache;
-    private final RegistryCache registryCache;
+    @Accessors(fluent = true)
+    private final JavaRegistryProvider javaRegistries;
+    private final ComponentCache componentCache;
     private final SkullCache skullCache;
     private final StructureBlockCache structureBlockCache;
-    private final TagCache tagCache;
     private final WaypointCache waypointCache;
     private final WorldCache worldCache;
 
@@ -568,7 +569,6 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
      */
     @Setter
     private Int2ObjectMap<GeyserStonecutterData> stonecutterRecipes = Int2ObjectMaps.emptyMap();
-    private final List<GeyserSmithingRecipe> smithingRecipes = new ArrayList<>();
     private final TrimRecipes trimRecipes = new TrimRecipes();
 
     /**
@@ -756,6 +756,22 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
     private ScheduledFuture<?> tickThread = null;
 
     /**
+     * Inventory clicks left to send to the Java server this tick.
+     */
+    private int inventoryClicksLeft = ClickPlan.MAX_CLICKS_PER_TICK;
+
+    /**
+     * When an emote of this player was last relayed to other sessions, in milliseconds.
+     */
+    @Setter
+    private long lastEmoteTime;
+
+    /**
+     * How many packet translations of this session have thrown.
+     */
+    private int translatorFailures;
+
+    /**
      * The number of ticks that have elapsed since the start of this session
      */
     private int ticks;
@@ -869,7 +885,6 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
         this.bookEditCache = new BookEditCache(this);
         this.bundleCache = new BundleCache(this);
         this.chunkCache = new ChunkCache(this);
-        this.componentCache = new ComponentCache(this);
         this.entityCache = new EntityCache(this);
         this.effectCache = new EntityEffectCache();
         this.formCache = new FormCache(this);
@@ -877,10 +892,10 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
         this.lodestoneCache = new LodestoneCache();
         this.pistonCache = new PistonCache(this);
         this.preferencesCache = new PreferencesCache(this);
-        this.registryCache = new RegistryCache(this);
+        this.javaRegistries = new JavaRegistryTagCache();
+        this.componentCache = new ComponentCache(this.javaRegistries);
         this.skullCache = new SkullCache(this);
         this.structureBlockCache = new StructureBlockCache();
-        this.tagCache = new TagCache(this);
         this.waypointCache = new WaypointCache(this);
         this.worldCache = new WorldCache(this);
         this.cameraData = new GeyserCameraData(this);
@@ -908,13 +923,16 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
      * Send all necessary packets to load Bedrock into the server
      */
     public void connect() {
-        // Note: this.dimensionType may be null here if the player is connecting from online mode
         int minY = BedrockDimension.OVERWORLD.minY();
         int maxY = BedrockDimension.OVERWORLD.maxY();
-        for (JavaDimension javaDimension : this.registryCache.registry(JavaRegistries.DIMENSION_TYPE).values()) {
-            if (javaDimension.bedrockId() == BedrockDimension.OVERWORLD_ID) {
-                minY = Math.min(minY, javaDimension.minY());
-                maxY = Math.max(maxY, javaDimension.minY() + javaDimension.height());
+
+        // If not in GAME state, then the DIMENSION_TYPE registry will be uninitialised.
+        if (downstream != null && downstream.isState(ProtocolState.GAME)) {
+            for (JavaDimension javaDimension : this.javaRegistries.registry(JavaRegistries.DIMENSION_TYPE)) {
+                if (javaDimension.bedrockId() == BedrockDimension.OVERWORLD_ID) {
+                    minY = Math.min(minY, javaDimension.minY());
+                    maxY = Math.max(maxY, javaDimension.minY() + javaDimension.height());
+                }
             }
         }
         minY = Math.max(minY, -512);
@@ -929,7 +947,7 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
             geyser.getLogger().debug("Extending overworld dimension to " + minY + " - " + maxY);
 
             DimensionDataPacket dimensionDataPacket = new DimensionDataPacket();
-            dimensionDataPacket.getDefinitions().add(new DimensionDefinition("minecraft:overworld", maxY, minY, 5, 3, GeyserIntegratedPackUtil.INTEGRATED_PACK_UUID, ""));
+            dimensionDataPacket.getDefinitions().add(new DimensionDefinition("minecraft:overworld", maxY, minY, 5, 3, GeyserIntegratedPackUtil.INTEGRATED_PACK_UUID, "", 192, true));
             upstream.sendPacket(dimensionDataPacket);
         }
 
@@ -1130,7 +1148,8 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
      * If successful, also begins connecting to the Java server.
      */
     public boolean onMicrosoftLoginComplete(PendingMicrosoftAuthentication.AuthenticationTask task) {
-        if (closed) {
+        // A cancelled flow was replaced by a newer attempt, which completes the login instead
+        if (closed || task.getAuthentication().isCancelled()) {
             return false;
         }
         task.cleanup(); // player is online -> remove pending authentication immediately
@@ -1279,6 +1298,9 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
 
             // Remove from session manager
             geyser.getSessionManager().removeSession(this);
+            if (playerEntity.uuid() != null) {
+                SkinProvider.removeBedrockSkin(playerEntity.uuid());
+            }
             // Don't cancel any pending Microsoft auth here - the whole point of PendingMicrosoftAuthentication
             // is to let mobile users disconnect to finish auth in the browser. Task cleans up on timeout.
         }
@@ -1355,6 +1377,23 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
         }
     }
 
+    public int incrementTranslatorFailures() {
+        return ++translatorFailures;
+    }
+
+    /**
+     * Takes one inventory click from this tick's budget.
+     *
+     * @return false if the budget is spent
+     */
+    public boolean takeInventoryClick() {
+        if (inventoryClicksLeft <= 0) {
+            return false;
+        }
+        inventoryClicksLeft--;
+        return true;
+    }
+
     /**
      * Called every Minecraft tick.
      */
@@ -1368,6 +1407,7 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
         }
 
         try {
+            inventoryClicksLeft = ClickPlan.MAX_CLICKS_PER_TICK;
             pistonCache.tick();
 
             worldBorder.tick();
@@ -1804,16 +1844,18 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
 
     @Override
     public @NonNull String joinAddress() {
-        String combined = Optional.ofNullable(clientData).orElseThrow().getServerAddress();
-        int index = combined.lastIndexOf(":");
-        return combined.substring(0, index);
+        return parsedJoinAddress().getHost();
     }
 
     @Override
     public @Positive int joinPort() {
+        return parsedJoinAddress().getPort();
+    }
+
+    private JoinAddress parsedJoinAddress() {
+        // NetherNet clients send the signaling URL they used, e.g. http://example.com:19132:19132
         String combined = Optional.ofNullable(clientData).orElseThrow().getServerAddress();
-        int index = combined.lastIndexOf(":");
-        return Integer.parseInt(combined.substring(index + 1));
+        return JoinAddress.parse(combined, geyser.config().bedrock().port());
     }
 
     @Override
@@ -1831,7 +1873,7 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
 
     @Override
     public void openPauseScreenAdditions() {
-        List<Dialog> additions = tagCache.get(DialogTag.PAUSE_SCREEN_ADDITIONS);
+        List<Dialog> additions = javaRegistries.tag(DialogTag.PAUSE_SCREEN_ADDITIONS);
         if (additions.isEmpty()) {
             if (!serverLinks.isEmpty()) {
                 dialogManager.openDialog(BuiltInDialog.SERVER_LINKS);
@@ -1845,7 +1887,7 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
 
     @Override
     public void openQuickActions() {
-        List<Dialog> quickActions = tagCache.get(DialogTag.QUICK_ACTIONS);
+        List<Dialog> quickActions = javaRegistries.tag(DialogTag.QUICK_ACTIONS);
         if (!quickActions.isEmpty()) {
             if (quickActions.size() == 1) {
                 dialogManager.openDialog(quickActions.getFirst());
@@ -1899,7 +1941,7 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
     @Override
     public boolean sendForm(@NonNull Form form) {
         // Check if we're in the config stage, if so, prepare the client for forms
-        if (this.downstream != null && this.downstream.getSession().getPacketProtocol().getInboundState().equals(ProtocolState.CONFIGURATION)) {
+        if (this.downstream != null && this.downstream.isState(ProtocolState.CONFIGURATION)) {
             this.prepareForConfigurationForm();
         }
         // First close any dialogs that are open. This won't execute the dialog's closing action.
@@ -2033,7 +2075,7 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
         startGamePacket.setUniqueEntityId(playerEntity.geyserId());
         startGamePacket.setRuntimeEntityId(playerEntity.geyserId());
         GameType gameType = EntityUtils.toBedrockGamemode(gameMode);
-        if (gameType == GameType.SURVIVAL_VIEWER && GameProtocol.is26_40orHigher(this.protocolVersion())) {
+        if (gameType == GameType.SURVIVAL_VIEWER) {
             gameType = GameType.SURVIVAL;
             pendingSpectator = true;
         }
@@ -2656,11 +2698,6 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
         transferPacket.setPort(port);
         sendUpstreamPacket(transferPacket);
         return true;
-    }
-
-    @Override
-    public void showEmote(@NonNull GeyserPlayerEntity emoter, @NonNull String emoteId) {
-        entities().showEmote(emoter, emoteId);
     }
 
     @Override

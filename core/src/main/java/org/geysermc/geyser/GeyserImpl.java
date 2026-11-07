@@ -25,7 +25,6 @@
 
 package org.geysermc.geyser;
 
-import org.cloudburstmc.netty.util.nethernet.TrustedProxies;
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 import io.netty.channel.epoll.Epoll;
@@ -76,7 +75,6 @@ import org.geysermc.geyser.api.util.PlatformType;
 import org.geysermc.geyser.command.CommandRegistry;
 import org.geysermc.geyser.configuration.GeyserConfig;
 import org.geysermc.geyser.configuration.GeyserPluginConfig;
-import org.geysermc.geyser.entity.VanillaEntities;
 import org.geysermc.geyser.erosion.UnixSocketClientListener;
 import org.geysermc.geyser.event.GeyserEventBus;
 import org.geysermc.geyser.event.type.SessionDisconnectEventImpl;
@@ -88,7 +86,6 @@ import org.geysermc.geyser.network.RaknetServer;
 import org.geysermc.geyser.network.bedrock.GameProtocol;
 import org.geysermc.geyser.network.bedrock.nethernet.NetherNetServer;
 import org.geysermc.geyser.ping.GeyserLegacyPingPassthrough;
-import org.geysermc.geyser.registry.BlockRegistries;
 import org.geysermc.geyser.registry.Registries;
 import org.geysermc.geyser.registry.loader.ResourcePackLoader;
 import org.geysermc.geyser.registry.mappings.BuiltInMappings;
@@ -98,7 +95,6 @@ import org.geysermc.geyser.session.GeyserSession;
 import org.geysermc.geyser.session.PendingMicrosoftAuthentication;
 import org.geysermc.geyser.session.SessionDisconnectListener;
 import org.geysermc.geyser.session.SessionManager;
-import org.geysermc.geyser.session.cache.RegistryCache;
 import org.geysermc.geyser.skin.FloodgateSkinUploader;
 import org.geysermc.geyser.skin.ProvidedSkins;
 import org.geysermc.geyser.skin.SkinProvider;
@@ -254,19 +250,9 @@ public class GeyserImpl implements GeyserApi, EventRegistrar {
         eventBus.subscribe(this, GeyserDefineCustomBlocksEvent.class, BuiltInMappings::registerBlocks);
         eventBus.subscribe(this, GeyserDefineCustomItemsEvent.class, BuiltInMappings::registerItems);
 
-        /*
-        First load the registries and then populate them.
-        Both the block registries and the common registries depend on each other,
-        so maintaining this order is crucial for Geyser to load.
-         */
         Registries.load();
-        BlockRegistries.populate();
-        Registries.populate();
-
-        RegistryCache.init();
 
         /* Initialize translators */
-        VanillaEntities.init();
         MessageTranslator.init();
 
         // Download the latest asset list and cache it
@@ -329,15 +315,22 @@ public class GeyserImpl implements GeyserApi, EventRegistrar {
         Registries.RESOURCE_PACKS.load();
         Registries.WAYPOINT_STYLE_MAPPINGS.load();
 
-        // Warnings to users who enable options that they might not need.
-        if (config.advanced().bedrock().useHaproxyProtocol()) {
-            logger.warning("Geyser is configured to expect HAProxy protocol for incoming Bedrock connections.");
-            logger.warning("If you do not know what this is, open the Geyser config, and set \"use-haproxy-protocol\" under the  \"advanced/bedrock\" section to \"false\".");
-        }
+        if (!Boolean.getBoolean("Geyser.HideProxyProtocolWarnings")) {
+            // Warnings to users who enable options that they might not need.
+            if (!config.advanced().bedrock().haproxyProtocolWhitelistedIps().isEmpty()) {
+                logger.warning("Geyser is configured to expect HAProxy protocol for incoming Bedrock connections.");
+                logger.warning("If you do not know what this is, open the Geyser config, and empty \"haproxy-protocol-whitelisted-ips\" under the \"advanced/bedrock\" section.");
+            }
 
-        if (config.advanced().java().useHaproxyProtocol()) {
-            logger.warning("Geyser is configured to use proxy protocol when connecting to the Java server.");
-            logger.warning("If you do not know what this is, open the Geyser config, and set \"use-haproxy-protocol\" under the  \"advanced/java\" section to \"false\".");
+            if (!config.advanced().bedrock().webrtcProxyProtocolRelays().isEmpty()) {
+                logger.warning("Geyser is configured to expect PROXY protocol on the WebRTC port, so players can only reach NetherNet through the relays in \"webrtc-proxy-protocol-relays\".");
+                logger.warning("If you do not know what this is, open the Geyser config, and empty \"webrtc-proxy-protocol-relays\" under the \"advanced/bedrock\" section.");
+            }
+
+            if (config.advanced().java().useHaproxyProtocol()) {
+                logger.warning("Geyser is configured to use proxy protocol when connecting to the Java server.");
+                logger.warning("If you do not know what this is, open the Geyser config, and set \"use-haproxy-protocol\" under the  \"advanced/java\" section to \"false\".");
+            }
         }
 
         if (!config.advanced().bedrock().validateBedrockLogin()) {
@@ -443,7 +436,7 @@ public class GeyserImpl implements GeyserApi, EventRegistrar {
                 config.bedrock().transport(transport);
                 logger.info("Transport set from system property: " + transport.name().toLowerCase(Locale.ROOT));
             } catch (IllegalArgumentException e) {
-                logger.error("Invalid transport from system property: " + transportProperty + "! Use \"nethernet\", \"both\" or \"raknet\". Defaulting to configured transport.");
+                logger.error("Invalid transport from system property: " + transportProperty + "! Use \"nethernet\" or \"both\". Defaulting to configured transport.");
             }
         }
 
@@ -454,7 +447,18 @@ public class GeyserImpl implements GeyserApi, EventRegistrar {
                 config.bedrock().signaling().mode(mode);
                 logger.info("Signaling mode set from system property: " + mode.name().toLowerCase(Locale.ROOT));
             } catch (IllegalArgumentException e) {
-                logger.error("Invalid signaling mode from system property: " + signalingModeProperty + "! Use \"builtin\", \"hybrid\", \"nxs\" or \"none\". Defaulting to configured signaling mode.");
+                logger.error("Invalid signaling mode from system property: " + signalingModeProperty + "! Use \"builtin\", \"hybrid\" or \"nxs\". Defaulting to configured signaling mode.");
+            }
+        }
+
+        String stunDiscoveryProperty = System.getProperty("geyserStunDiscovery", "");
+        if (!stunDiscoveryProperty.isEmpty()) {
+            if (stunDiscoveryProperty.equalsIgnoreCase("true") || stunDiscoveryProperty.equalsIgnoreCase("false")) {
+                boolean stunDiscovery = Boolean.parseBoolean(stunDiscoveryProperty);
+                config.bedrock().signaling().stunDiscovery(stunDiscovery);
+                logger.info("STUN discovery set from system property: " + stunDiscovery);
+            } else {
+                logger.error("Invalid STUN discovery from system property: " + stunDiscoveryProperty + "! Use \"true\" or \"false\". Defaulting to configured STUN discovery.");
             }
         }
 
@@ -513,6 +517,9 @@ public class GeyserImpl implements GeyserApi, EventRegistrar {
             logger.debug("Epoll is not available; Erosion's Unix socket handling will not work.");
         }
 
+        // On reload, the new NetherNet server needs what the old provider holds until it stops
+        runIfNonNull(netherNetServer, NetherNetServer::awaitShutdown);
+
         // RakNet takes the UDP side of the Bedrock port; NetherNet signaling its TCP side, and WebRTC
         // the UDP side too if RakNet is not running
         GeyserConfig.BedrockConfig.Transport transport = config.bedrock().transport();
@@ -521,10 +528,8 @@ public class GeyserImpl implements GeyserApi, EventRegistrar {
         if (transport.raknet()) {
             startRaknet(config, logger);
         }
-        if (transport.nethernet()) {
-            this.netherNetServer = new NetherNetServer(this);
-            this.netherNetServer.start();
-        }
+        this.netherNetServer = new NetherNetServer(this);
+        this.netherNetServer.start();
 
         if (config.java().authType() == AuthType.FLOODGATE) {
             try {
@@ -717,9 +722,6 @@ public class GeyserImpl implements GeyserApi, EventRegistrar {
     public void reloadGeyser() {
         isReloading = true;
         this.eventBus.fire(new GeyserPreReloadEvent(this.extensionManager, this.eventBus));
-        // The config may name different proxies, so the resolved whitelist has to be fetched again
-        TrustedProxies.invalidate();
-
         bootstrap.onGeyserDisable();
         bootstrap.onGeyserEnable();
 
@@ -943,7 +945,41 @@ public class GeyserImpl implements GeyserApi, EventRegistrar {
             metrics.addCustomChart(new SimplePie("defaultLocale", GeyserLocale::getDefaultLocale));
             metrics.addCustomChart(new SimplePie("version", () -> GeyserImpl.VERSION));
             metrics.addCustomChart(new SimplePie("javaHaProxyProtocol", () -> String.valueOf(config.advanced().java().useHaproxyProtocol())));
-            metrics.addCustomChart(new SimplePie("bedrockHaProxyProtocol", () -> String.valueOf(config.advanced().bedrock().useHaproxyProtocol())));
+            metrics.addCustomChart(new AdvancedPie("bedrockProxies", () -> {
+                // Every kind configured counts, so a server running several shows up under each
+                GeyserConfig.AdvancedBedrockConfig bedrock = config.advanced().bedrock();
+                Map<String, Integer> proxies = new HashMap<>();
+                if (!bedrock.haproxyProtocolWhitelistedIps().isEmpty()) {
+                    proxies.put("haproxy", 1);
+                }
+                if (!bedrock.signalingTrustedProxies().isEmpty()) {
+                    proxies.put("x-forwarded-for", 1);
+                }
+                if (!bedrock.webrtcProxyProtocolRelays().isEmpty()) {
+                    proxies.put("webrtc-relays", 1);
+                }
+                if (proxies.isEmpty()) {
+                    proxies.put("none", 1);
+                }
+                return proxies;
+            }));
+            metrics.addCustomChart(new SimplePie("bedrockTransport", () -> config.bedrock().transport().toString().toLowerCase(Locale.ROOT)));
+            metrics.addCustomChart(new DrilldownPie("signalingMode", () -> {
+                // builtin => (https, 1)
+                // nxs => (nxs, 1)
+                GeyserConfig.SignalingConfig signaling = config.bedrock().signaling();
+                String builtinType;
+                if (!signaling.mode().builtin()) {
+                    builtinType = "nxs";
+                } else if (!signaling.builtin().https().certificate().isBlank()) {
+                    builtinType = "https";
+                } else if (!config.advanced().bedrock().signalingTrustedProxies().isEmpty()) {
+                    builtinType = "http (reverse proxy)";
+                } else {
+                    builtinType = "http";
+                }
+                return Map.of(signaling.mode().toString().toLowerCase(Locale.ROOT), Map.of(builtinType, 1));
+            }));
             metrics.addCustomChart(new AdvancedPie("playerPlatform", () -> {
                 Map<String, Integer> valueMap = new HashMap<>();
                 for (GeyserSession session : sessionManager.getAllSessions()) {
